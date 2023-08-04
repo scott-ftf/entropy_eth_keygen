@@ -12,7 +12,7 @@ import psutil
 import math
 from eth_keys import keys
 
-YOUR_API_KEY = "f0f7f501-fe8d-4041-8ffa-874a9f42f135"
+YOUR_API_KEY = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 
 def shannon_entropy(data):
     data_length = len(data)
