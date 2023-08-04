@@ -1,6 +1,6 @@
 # Entropy keygen
 
-Expermintal for testing entropy sources. Can also be used online (or offline) to generate ethereum addresses. Shannon entropy calculations may not be useful or applied correctly in this case for evaluating randomness 
+For experimenting with entropy sources. Can also be used online (or offline) to generate ethereum addresses.
 
 Optionaly uses <a href="https://api.random.org/">api.random.org</a> as an entropy source, which requires a free api key
 
@@ -11,4 +11,3 @@ sudo is required for running this script to access hardware sources of addtional
 sudo pip install eth-hash[pycryptodome] eth-keys
 ```
 
-<img src="https://i.imgur.com/GlhwFNY.png" />
