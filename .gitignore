@@ -1,0 +1,68 @@
+# Ignore Notes
+notes.md
+notes/
+
+# Ignore the virtual environment
+myenv/
+
+# Ignore Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Ignore IDE/editor-specific files
+.vscode/
+.idea/
+*.sublime-workspace
+
+# Ignore log files
+*.log
+*.out
+
+# Ignore compiled Python files
+*.pyo
+*.pyc
+*.pyd
+*.whl
+
+# Ignore environment variables and dependency files
+.env
+.venv
+*.env
+*.venv
+Pipfile
+Pipfile.lock
+
+# Ignore system-specific files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Ignore Ubuntu-specific files
+*.swp               
+*.swo
+*~ 
+.trash-*/
+.cache/
+.local/share/Trash/
+.config/
+
+# Ignore coverage and testing output
+.coverage
+.coverage.*
+*.cover
+.hypothesis/
+.tox/
+nosetests.xml
+pytest_cache/
+junit.xml
+
+# Ignore build and distribution files
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Ignore `.git` directory explicitly (though it should not be necessary)
+.git/
+
