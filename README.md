@@ -1,37 +1,17 @@
 # Entropy keygen
 
-For experimenting with entropy sources. Can be used online to generate ethereum addresses from external sources, or offline using only local sources.
+For experimenting with entropy sources. Can be used online to generate Ethereum addresses from external sources, or offline using only local sources.
 
-**⚠️ WARNING:** This script is **EXPERIMENTAL** for testing entropy sources. Use at **YOUR OWN RISK**.
+Following the entropy generation, the script provides a series of tests to evaluative aspects of the randomness
 
-Each entropy source includes Shannon calculations for insight into the randomness quality.
-
-EXAMPLE OUTPUT:
-
-```
-Shannon entropy calculations
-
-  Hardware RNG: 0.0
-   Yubikey RNG: 7.148
-Random Integer: 7.265
-       Secrets: 7.239
-    Dev Random: 7.221
-    Time-based: 7.14
-       Network: 7.178
-        System: 7.234
-
-
-Shannon Entropy Scale Guide
-7.98 - 8.00 → Near-perfect randomness (Nuclear launch codes)
-7.80 - 7.98 → Excellent randomness (Cryptographic apps)
-7.50 - 7.80 → Strong randomness (Security-sensitive use)
-7.00 - 7.50 → Moderate randomness (Acceptable but could be improved)
-Below  7.00 → Weak randomness (not suitable, patterns likely)
-
-
-FINAL COMBINED SHANNON ENTROPY: 7.987
-
-```
+| Test Name                           | Purpose                                   |
+| ----------------------------------- | ----------------------------------------- |
+| Shannon Entropy Calculation         | Measures overall unpredictability of data |
+| Chi-Square Goodness-of-Fit Test     | Checks for uniform byte distribution      |
+| Serial Correlation Coefficient Test | Detects repeating patterns in data        |
+| Monte Carlo Estimation of π Test    | Tests statistical randomness using π      |
+| Data Compression Ratio Analysis     | Estimates redundancy and compressibility  |
+| Bit Frequency (Monobit) Test        | Ensures an even mix of 0s and 1s          |
 
 
 
@@ -39,7 +19,6 @@ At the end of the script, produces a private/public keypair and address
 
 ```
 -----------BEGIN KEY OUTPUT-------------
-
 private key:
 0x61d2e91aaeda7a0996a319635a532c3476aa9a6f50cb8e6005e86f28db8debf4
 
@@ -48,10 +27,13 @@ public key:
 
 address:
 0x627a512f29101d6366c2ce49f87866b5c6df3796
-
 ------------END KEY OUTPUT--------------
 
 ```
+
+
+
+**⚠️ WARNING:** This script is **EXPERIMENTAL** for testing entropy sources. Use at **YOUR OWN RISK**.
 
 
 

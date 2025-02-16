@@ -355,7 +355,8 @@ def get_yubikey_rng():
         return b''
 
     if not check_yubikey_status():
-        print("Skipping YubiKey RNG extraction.")
+        print("Yibikey status failed. Skipping YubiKey RNG extraction.")
+        input("Press ANY KEY to continue")
         return b''
 
     print("\nAttempting to extract entropy from YubiKey via GPG...")
@@ -377,6 +378,7 @@ def get_yubikey_rng():
 
     except subprocess.CalledProcessError:
         print("Failed to extract entropy from YubiKey using GPG.")
+        input("Press ANY KEY to continue")
         return b''
 
 
