@@ -1,6 +1,6 @@
 # Entropy keygen
 
-For experimenting with entropy sources. Can be used online to generate Ethereum addresses from external sources, or offline using only local sources.
+For experimenting with entropy sources. The entropy can  then be used to generate Ethereum private keys and addresses.
 
 Following the entropy generation, the script provides a series of tests to evaluative aspects of the randomness
 
