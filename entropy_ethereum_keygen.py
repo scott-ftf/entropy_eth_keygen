@@ -13,17 +13,22 @@ import hashlib
 import shutil
 import math
 from eth_keys import keys
-import getpass
 from collections import Counter
 import socket
 import re
+import select
+import platform
+import threading
+import zlib
+import collections
+
 
 # Define the API key file in the application root directory
 API_KEY_FILE = os.path.join(os.path.dirname(__file__), "random_org_api.secret")
 
 
+# Calculate Shannon entropy of the byte sequences
 def shannon_entropy(data):
-    """Calculate Shannon entropy of a byte sequence."""
     if not data:
         return 0.0  # Avoid division by zero if data is empty
 
@@ -36,9 +41,9 @@ def shannon_entropy(data):
     return round(entropy, 3)  
 
 
+# Displays the results in hexadecimal format with ASCII representation, and calculates entropy.
 def hex_viewer(data, shannon=True):
-    """Displays data in hexadecimal format with ASCII representation, and calculates entropy."""
-    
+  
     if not data:
         print("\nNo data provided for hex viewer.")
         return
@@ -54,88 +59,13 @@ def hex_viewer(data, shannon=True):
 
     if shannon:
         counter = Counter(data)
-        print(f"\nData Length: {len(data)} bytes")
-        print(f"Unique Byte Count: {len(counter)}")
-        print("Entropy Shannon:", shannon_entropy(data))  
+        print(f"\nData Byte Length: {len(data)}")
+        print(f"    Unique Bytes: {len(counter)}")
+        print(f" Shannon Entropy:", shannon_entropy(data))  
 
 
-def run_with_sudo(command):
-    """Run a command with sudo privileges"""
-    password = getpass.getpass("Enter sudo password: ")
-
-    try:
-        # Run the command with sudo, ensuring we capture only the output
-        process = subprocess.Popen(
-            f"sudo -S {command}",
-            shell=True,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True
-        )
-        output, error = process.communicate(password + "\n")
-
-        if process.returncode != 0:
-            print(f"Failed to execute sudo command: {error.strip()}")
-            return None
-
-        return output.strip()  # Remove extra newlines/spaces
-    except Exception as e:
-        print(f"Error running sudo command: {e}")
-        return None
-
-
-def get_hardware_rng():
-    print("\nHardware RNG (if exists, may require sudo)")
-
-    if not os.path.exists('/dev/hwrng'):
-        print("No hardware RNG device found. Skipping...")
-        return b''
-
-    if input("Do you want to try this source? (y/N): ").strip().lower() in ['n', '']:
-        print("Skipping hardware RNG check.")
-        return b''
-
-    try:
-        # Try reading without sudo
-        with open('/dev/hwrng', 'rb') as f:
-            entropy = f.read(256)  # 🔹 Increased to 256 bytes for better entropy
-        print("Successfully read from hardware RNG (without sudo).")
-        hex_viewer(entropy)
-        return entropy
-
-    except PermissionError:
-        print("Permission denied. You may need sudo access to read from the hardware RNG.")
-
-        # Ask the user if they want to retry with sudo or skip
-        choice = input("Would you like to enter sudo to try again? (y/N): ").strip().lower()
-        if choice in ['n', '']:
-            print("Skipping hardware RNG check.")
-            return b''
-
-        # Use sudo to check if the hardware RNG can be accessed
-        command = ["sudo", "dd", "if=/dev/hwrng", "bs=256", "count=1", "status=none"]
-        try:
-            process = subprocess.run(command, capture_output=True, text=False)  # Avoids password handling
-
-            if process.returncode != 0:
-                print(f"Failed to read from hardware RNG with sudo: {process.stderr.decode().strip()}")
-                print("Skipping hardware RNG check.")
-                return b''
-
-            entropy = process.stdout  # No need to re-encode
-            print("Successfully read from hardware RNG (with sudo).")
-            hex_viewer(entropy)
-            return entropy
-
-        except Exception as e:
-            print(f"Error using sudo for hardware RNG: {e}")
-            print("Skipping hardware RNG check.")
-            return b''
-
-
+# Check if ykman is installed; if not, ask for permission and install via Snap
 def install_ykman():
-    """Check if ykman is installed; if not, ask for permission and install via Snap."""
     if shutil.which("ykman") is None:
         print("\nYubico `ykman` is required to use a YubiKey for entropy.")
         choice = input("Would you like to install `ykman` now? (Y/n): ").strip().lower()
@@ -154,8 +84,8 @@ def install_ykman():
     return True
 
 
+# Check if a YubiKey is detected and OpenPGP is enabled
 def check_yubikey_status():
-    """Check if a YubiKey is detected and OpenPGP is enabled"""
     try:
         output = subprocess.check_output(
             ["ykman", "info"],
@@ -173,42 +103,7 @@ def check_yubikey_status():
         return False
 
 
-def get_yubikey_rng():
-    """Attempt to extract entropy from YubiKey using GnuPG."""
-    print("\nYubiKey has a built-in random number generator via OpenPGP applet")
-    choice = input("Do you want to use this source? (Y/n): ").strip().lower()
-    if choice not in ['y', '']:
-        print("Skipping YubiKey RNG extraction.")
-        return b''
-
-    input("\nPlug in your YubiKey and press Enter when ready...")
-
-    if not install_ykman():
-        return b''
-
-    if not check_yubikey_status():
-        print("Skipping YubiKey RNG extraction.")
-        return b''
-
-    print("\nAttempting to extract entropy from YubiKey via GPG...")
-
-    entropy = b''
-    try:
-        # Generate 8 blocks of 32 bytes each (for 256 bytes total)
-        for _ in range(8):  
-            entropy += subprocess.check_output(["gpg", "--gen-random", "0", "32"], universal_newlines=False)
-
-        if len(entropy) != 256:
-            print("Unexpected entropy size! Received:", len(entropy), "bytes")
-
-        print("Successfully extracted 256 bytes of entropy from YubiKey.")
-        hex_viewer(entropy)
-        return entropy
-    except subprocess.CalledProcessError:
-        print("Failed to extract entropy from YubiKey using GPG.")
-        return b''
-
-
+# Load API for randomn.org entropy source
 def load_api_key():
     api_key_path = "random_org_api.secret"
 
@@ -236,10 +131,263 @@ def load_api_key():
     input("Press ANY KEY to skip for now...")  # Wait for user input
     return None
 
+# read CPU cycle counter on x86
+def get_rdtsc():
+    if platform.system() == "Linux":
+        try:
+            with open("/proc/self/stat", "r") as f:
+                fields = f.read().split()
+                return int(fields[21])  # CPU clock ticks
+        except Exception:
+            return 0
+    return 0  # Default to 0 if not available
 
+
+#splash screen
+def splash():
+
+    print("\nENTROPY ETHEREUM KEY GENERATOR")
+    print("\nThis script will walk through a selection of randomness sources to be used as entropy in generating Ethereum key pairs. Any source may be skipped. Tests are available at the end to evaluate the results.")
+
+    print("\nUSE AT YOUR OWN RISK")
+
+    input("\nPress ANY KEY to begin")
+
+
+# ENTROPY SOURCE - meant to be purely user selected dice, and time based entropy
+def quantum_dice_entropy():
+    os.system("clear && printf '\x1b[3J'")
+
+    print("\n\nVIRTUAL QUANTUM DICE")
+    print("A virtual 2^256-sided die - more possible outcomes than the number of atoms in the observable universe. Incorporates your input timing, high-speed CPU fluctuations, and nanosecond-precision system time jitter as additional entropy.")
+    print("\nNOTE: Random time between key presses increases entropy.")
+
+    total_rolls = 16  # Number of rolls required
+    collected_entropy = b""  # Byte buffer to store all entropy sources
+
+    # Capture system uptime for additional time-based entropy
+    system_uptime_ns = time.monotonic_ns()
+
+    input("\nPress ANY KEY to throw the first roll...")
+    print()
+
+    # Capture timestamp of first keypress
+    first_keypress_time_ns = time.time_ns()
+
+    # Initialize the rolling hash using the first keypress timestamp
+    rolling_hash = hashlib.sha256(first_keypress_time_ns.to_bytes(8, 'big')).digest()
+
+    for roll_number in range(1, total_rolls + 1):
+        # Ensure a clean start for each roll
+        sys.stdout.write("\n") 
+        sys.stdout.flush()
+
+        print(f"Roll {roll_number}/{total_rolls}")
+        print("Press ANY KEY to stop the dice...")
+
+        # Capture start time before rolling
+        start_time_ns = time.time_ns()
+        start_perf_counter_ns = time.perf_counter_ns()
+        start_monotonic_ns = time.monotonic_ns()
+
+        # Mix in CPU cycle counter for additional entropy
+        start_rdtsc = get_rdtsc()
+
+        # Continuously generate SHA-256 hashes as fast as possible
+        while True:
+            # Capture multiple timestamps per iteration for added jitter
+            iter_time_ns = time.time_ns()
+            iter_perf_ns = time.perf_counter_ns()
+            iter_mono_ns = time.monotonic_ns()
+            iter_rdtsc = get_rdtsc()
+
+            # Update rolling hash using multiple timing sources
+            rolling_hash = hashlib.sha256(
+                rolling_hash +
+                iter_time_ns.to_bytes(8, 'big') +
+                iter_perf_ns.to_bytes(8, 'big') +
+                iter_mono_ns.to_bytes(8, 'big') +
+                iter_rdtsc.to_bytes(8, 'big')
+            ).digest()
+
+            # Print in-place so terminal output doesn't move
+            sys.stdout.write("\r" + rolling_hash.hex())
+            sys.stdout.flush()
+
+            # Check for user input
+            is_windows = sys.platform.startswith('win')
+            if is_windows:
+                import msvcrt
+                if msvcrt.kbhit():
+                    msvcrt.getch()  # Consume the input
+                    break  # Stop rolling when user presses a key
+            else:
+                if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
+                    input()  # Consume the input
+                    break  # Stop rolling when user presses a key
+
+        # Fix: Delete the last four lines before printing the final selected hash - Is this workingcorrect now?
+        sys.stdout.write("\033[F\033[K")  # Remove "Press ANY KEY to stop the dice..."
+        sys.stdout.write("\033[F\033[K")  # Remove rolling hash output
+        sys.stdout.write("\033[F\033[K")  # Remove roll number
+        sys.stdout.write("\033[F\033[K")  # Remove any lingering text
+        sys.stdout.flush()
+
+        # Print the final selection with roll number on a single line
+        print(f"Roll #{roll_number} - {rolling_hash.hex()}")
+
+        # Capture stop time
+        stop_time_ns = time.time_ns()
+        stop_perf_counter_ns = time.perf_counter_ns()
+        stop_monotonic_ns = time.monotonic_ns()
+        stop_rdtsc = get_rdtsc()
+
+        # Final entropy sources for this roll
+        entropy_sources = (
+            rolling_hash +
+            start_time_ns.to_bytes(8, 'big') +
+            stop_time_ns.to_bytes(8, 'big') +
+            start_perf_counter_ns.to_bytes(8, 'big') +
+            stop_perf_counter_ns.to_bytes(8, 'big') +
+            start_monotonic_ns.to_bytes(8, 'big') +
+            stop_monotonic_ns.to_bytes(8, 'big') +
+            start_rdtsc.to_bytes(8, 'big') +
+            stop_rdtsc.to_bytes(8, 'big') +
+            system_uptime_ns.to_bytes(8, 'big')
+        )
+
+        # Hash all collected entropy for this roll
+        roll_entropy = hashlib.sha256(entropy_sources).digest()
+
+        # Append to total entropy pool
+        collected_entropy += roll_entropy
+
+    # After the last roll (Roll #16), add blank line
+    print("\n")
+
+    # Generate 256 bytes (8 SHA-256 hashes)
+    final_entropy = b""
+    rolling_state = collected_entropy
+    for _ in range(8):
+        rolling_state = hashlib.sha256(rolling_state).digest()
+        final_entropy += rolling_state
+
+    # Display final entropy (hex format)
+    hex_viewer(final_entropy)
+    input("\nPress ANY KEY for the next source")    
+
+    return final_entropy
+
+
+# ENTROPY SOURCE - use hardware RNG if it exists
+def get_hardware_rng():
+    os.system("clear && printf '\x1b[3J'")
+
+    print("\n\nHARDWARE RANDOM NUMBER GENERATOR")
+    print("If a hardware RNG is installed, it produces true non-deterministic randomness from physical processes like thermal noise and electrical jitter for high-quality entropy without software-based algorithms. (may require sudo)")
+
+    if not os.path.exists('/dev/hwrng'):
+        print("\nNo hardware RNG device found")
+        input("Press ANY KEY to skip hardware RNG check")
+        return b''
+
+    if input("\nDo you want to try this source? (y/N): ").strip().lower() in ['n', '']:
+        print("Skipping hardware RNG check.")
+        return b''
+
+    try:
+        # Try reading without sudo
+        with open('/dev/hwrng', 'rb') as f:
+            entropy = f.read(256)  # 🔹 Increased to 256 bytes for better entropy
+        print("Successfully read from hardware RNG (without sudo).")
+        hex_viewer(entropy)
+        input("\nPress ANY KEY")
+
+        return entropy
+
+    except PermissionError:
+        print("Permission denied. You may need sudo access to read from the hardware RNG.")
+
+        # Ask the user if they want to retry with sudo or skip
+        choice = input("Would you like to enter sudo to try again? (y/N): ").strip().lower()
+        if choice in ['n', '']:
+            print("Skipping hardware RNG check.")
+            return b''
+
+        # Use sudo to check if the hardware RNG can be accessed
+        command = ["sudo", "dd", "if=/dev/hwrng", "bs=256", "count=1", "status=none"]
+        try:
+            process = subprocess.run(command, capture_output=True, text=False)  # Avoids password handling
+
+            if process.returncode != 0:
+                print(f"\nFailed to read from hardware RNG with sudo:\n{process.stderr.decode().strip()}")
+                input("Press ANY KEY to skip hardware RNG check")
+                return b''
+
+            entropy = process.stdout  # No need to re-encode
+            print("Successfully read from hardware RNG (with sudo).")
+            hex_viewer(entropy)
+            input("\nPress ANY KEY")
+
+            return entropy
+
+        except Exception as e:
+            print(f"\nError using sudo for hardware RNG: {e}")
+            input("Press ANY KEY to skip hardware RNG check")
+            return b''
+
+
+# ENTROPY SOURCE - Use Yubikey as a RNG
+def get_yubikey_rng():
+    os.system("clear && printf '\x1b[3J'")
+
+    print("\n\nYUBIKEY GPG RNG")
+    print("If a YubiKey is attached, generates randomness via GPG where cryptographic operations occur on the YubiKey instead of the OS.")
+
+    choice = input("\nDo you want to use this source? (Y/n): ").strip().lower()
+    if choice not in ['y', '']:
+        print("Skipping YubiKey RNG extraction.")
+        return b''
+
+    input("\nPlug in your YubiKey and press Enter when ready...")
+
+    if not install_ykman():
+        return b''
+
+    if not check_yubikey_status():
+        print("Skipping YubiKey RNG extraction.")
+        return b''
+
+    print("\nAttempting to extract entropy from YubiKey via GPG...")
+
+    entropy = b''
+    try:
+        # Generate 8 blocks of 32 bytes each (for 256 bytes total)
+        for _ in range(8):  
+            entropy += subprocess.check_output(["gpg", "--gen-random", "0", "32"], universal_newlines=False)
+
+        if len(entropy) != 256:
+            print("Unexpected entropy size! Received:", len(entropy), "bytes")
+
+        print("Successfully extracted 256 bytes of entropy from YubiKey.")
+        hex_viewer(entropy)
+        input("\nPress ANY KEY for the next source")
+
+        return entropy
+
+    except subprocess.CalledProcessError:
+        print("Failed to extract entropy from YubiKey using GPG.")
+        return b''
+
+
+# ENTROPY SOURCE - Random.org
 def get_random_integer():
-    print("\nRandom.org generates true random numbers based on atmospheric noise (requires free API key in config)")   
-    if input("Do you want to use this source? (Y/n): ").strip().lower() not in ['y', '']:
+    os.system("clear && printf '\x1b[3J'")
+
+    print("\n\nRANDOM.ORG RNG")
+    print("Retrieves randomness from RANDOM.ORG, generated from atmospheric noise for high-quality entropy beyond algorithmic methods. (Requires free API key in the random_org_api.secret file)")
+
+    if input("\nDo you want to use this source? (Y/n): ").strip().lower() not in ['y', '']:
         print("Skipping Random.org entropy extraction.")
         return b''
 
@@ -277,6 +425,8 @@ def get_random_integer():
                 print(f"Warning: Received {len(entropy)} bytes instead of 256!")
 
             hex_viewer(entropy)
+            input("\nPress ANY KEY for the next source")
+
             return entropy
 
         else:
@@ -288,347 +438,319 @@ def get_random_integer():
         return b''
 
 
-def trim_zeros(data):
-    """Remove only leading and trailing zeros, not internal ones."""
-    return data.lstrip(b'\x00').rstrip(b'\x00')
-
-
-def get_time_based_entropy():
-    print("\nTime-based entropy with user-assisted randomness.")
-
-    if input("Do you want to use this source? (Y/n): ").strip().lower() in ['n']:
-        print("Skipping time-based entropy.")
-        return b''
-
-    timestamps = []
-    print("\nPress Enter **six times** to capture timing randomness.\n")
-
-    # Capture user-driven time variations
-    for i in range(6):
-        input(f"Press Enter to randomly select a timestamp ({i+1}/6)...")
-        ts = time.time_ns()
-        mono_ts = time.monotonic_ns()
-        perf_ts = time.perf_counter_ns()
-        
-        # Store multiple time sources
-        timestamps.append((ts, mono_ts, perf_ts))
-
-    # Compute time deltas between user presses
-    intervals = [
-        (timestamps[i+1][0] - timestamps[i][0]) ^  # Normal time delta
-        (timestamps[i+1][1] - timestamps[i][1]) ^  # Monotonic delta
-        (timestamps[i+1][2] - timestamps[i][2])    # Perf counter delta
-        for i in range(5)
-    ]
-
-    # XOR all timestamps and intervals together to seed entropy
-    mixed_time = timestamps[0][0]
-    for i in range(1, len(timestamps)):
-        mixed_time ^= timestamps[i][0] ^ timestamps[i][1] ^ timestamps[i][2]
-    for interval in intervals:
-        mixed_time ^= interval
-
-    entropy_bytes = bytearray()
-    prev_time = mixed_time  # Seed automated loop with user-generated randomness
-
-    while len(entropy_bytes) < 256:  # Ensure 256 bytes of entropy
-        # Capture system timing variations in each loop
-        current_time = time.time_ns()
-        monotonic_time = time.monotonic_ns()
-        perf_time = time.perf_counter_ns()
-        
-        # Mix in collected user timing randomness
-        prev_time ^= (current_time ^ monotonic_time ^ perf_time)
-        
-        # Shuffle bits before selecting bytes
-        prev_time = ((prev_time >> 3) ^ (prev_time << 7)) & 0xFFFFFFFFFFFFFFFF
-        
-        # Convert to bytes
-        entropy_chunk = prev_time.to_bytes(8, byteorder='little')
-
-        # Append all bytes, including zeros (zeros may be useful for randomness)
-        entropy_bytes.extend(entropy_chunk)
-
-        # Use user-collected timing deltas to influence loop timing
-        delay_index = random.randint(0, len(intervals) - 1)
-        delay = abs(intervals[delay_index]) % 100000  # Delay based on user timing
-        target_time = time.perf_counter_ns() + delay
-        while time.perf_counter_ns() < target_time:
-            pass  # Allow system to naturally introduce more jitter
-
-    entropy_bytes = entropy_bytes[:256]
-    print(f"\nGenerated {len(entropy_bytes)} bytes of entropy from time-based and user-driven randomness.")
-    hex_viewer(entropy_bytes)
-
-    return entropy_bytes  
-
-'''
-REMOVE - human biased, low unique bytes, low shannon compared to otehr sourcess
-
-def get_keyboard_entropy():
-    print("\nKeyboard entropy allows you to provide randomness by typing random characters.")
-    if input("Do you want to use this source? (Y/n): ").strip().lower() in ['n']:
-        print("Skipping keyboard entropy.")
-        return b''
-
-    print("Type AT LEAST 256 characters of random text, then press Enter...")
-
-    typed_data = []
-    timing_data = []
-    prev_time = time.time()
-
-    while len(typed_data) < 256:  
-        user_input = input("\n> ")
-
-        if not user_input:
-            print("You must enter at least one character.")
-            continue
-
-        typed_data.extend(user_input)
-
-        # Capture keystroke timing deltas for extra entropy
-        curr_time = time.time()
-        time_diff = int((curr_time - prev_time) * 1e6)  # Convert to microseconds
-        prev_time = curr_time
-        timing_data.append(chr(time_diff % 256))  
-
-        # Show remaining characters after user presses Enter
-        remaining_chars = 256 - len(typed_data)
-        if remaining_chars > 0:
-            print(f"You need at least {remaining_chars} more characters.")
-
-    # Combine typed characters with keystroke timing data
-    entropy = "".join(typed_data + timing_data).encode()
-
-    print("\nSufficient keyboard randomness collected.")
-    hex_viewer(entropy)
-    return entropy
-'''
-
+# ENTROPY SOURCE - Secrets library
 def get_secrets():
-    print("\nSecrets library can generate cryptographically strong random numbers.")
+    os.system("clear && printf '\x1b[3J'")
+
+    print("\n\nSECRETS LIBRARY")
+    print("Generates cryptographic-grade randomness using the Python secrets module, designed for secure tokens and key generation.")
     
-    if input("Do you want to use this source? (Y/n): ").strip().lower() in ['y', '']:
+    if input("\nDo you want to use this source? (Y/n): ").strip().lower() in ['y', '']:
         # Generate 256 bytes directly from secrets
         entropy = secrets.token_bytes(256)
 
         hex_viewer(entropy)
+        input("\nPress ANY KEY for the next source")
+
         return entropy
 
     return b''
 
-
+# ENTROPY SOURCE - /dev/random
 def get_dev_random():
-    print("\n/dev/random is a special file in Unix-like systems that serves as a random number generator.")    
-    if input("Do you want to use this source? (Y/n): ").strip().lower() in ['y', '']:
-        with open('/dev/random', 'rb') as f:
-            entropy = f.read(256)
-        
-        hex_viewer(entropy)
-        return entropy
+    os.system("clear && printf '\x1b[3J'")
 
-    return b''
+    print("\n\nSYSTEM ENTROPY POOL")
+    print("Utilizes /dev/random, a blocking randomness source standard on Unix-like operating systems that continuously harvests system entropy from user interactions, disk I/O fluctuations, and hardware noise.")
+
+    if input("\nDo you want to use this source? (Y/n): ").strip().lower() not in ['y', '']:
+        return b''
+
+    with open('/dev/random', 'rb') as f:
+        entropy_chunks = [f.read(256) for _ in range(4)]  # Read in 4 blocks
+
+    # XOR the chunks together for better mixing
+    entropy = bytes(a ^ b ^ c ^ d for a, b, c, d in zip(*entropy_chunks))
+
+    # Add timing jitter to introduce variability at the extraction moment
+    jitter = struct.pack("!Q", time.perf_counter_ns() ^ time.time_ns() ^ time.monotonic_ns())
+    entropy = bytes(a ^ b for a, b in zip(entropy, jitter * (len(entropy) // 8)))
+
+    hex_viewer(entropy)
+    input("\nPress ANY KEY for the next source")
+
+    return entropy
 
 
+# ENTROPY SOURCE - uses network metrics t generate randomness
 def get_network_entropy():
-    print("\nNetwork entropy fetches randomness from network statistics.")
+    os.system("clear && printf '\x1b[3J'")
+
+    print("\n\nNETWORK ENTROPY")
+    print("Network metrics are highly variable real-world conditions that are unpredictable. Collects randomness from connections, ephemeral port bindings, interface statistics, router queries, ping jitter, network buffer fill levels, and TCP retransmission counts.")
     
-    if input("Do you want to use this source? (Y/n): ").strip().lower() not in ['y', '']:
+    if input("\nDo you want to use this source? (Y/n): ").strip().lower() not in ['y', '']:
         print("Skipping network entropy.")
         return b''
 
     network_data = bytearray()
+    max_attempts = 10
+    attempts = 0
 
     def collect_network_metrics():
-        """Gathers multiple sources of network randomness using standard libraries."""
-        temp_data = bytearray()
-        snapshot_count = 5  # Number of network snapshots
+        snapshot = bytearray()
 
-        # Capture multiple snapshots over time
-        history = []
-        for _ in range(snapshot_count):
-            snapshot = bytearray()
+        # Active TCP Connections
+        try:
+            connections = socket.getaddrinfo(None, None, proto=socket.IPPROTO_TCP)
+            for conn in connections:
+                snapshot.extend(struct.pack("!H", conn[4][1]))  # Port numbers
+        except Exception:
+            pass
 
-            # Collect active network connections
-            try:
-                connections = socket.getaddrinfo(None, None, proto=socket.IPPROTO_TCP)
-                for conn in connections:
-                    snapshot.extend(struct.pack("!H", conn[4][1]))  # Port number as 2 bytes
-            except Exception:
-                pass  # Ignore errors
+        # Bind Multiple Ephemeral Ports
+        try:
+            for _ in range(3):
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.bind(("", 0))
+                local_port = sock.getsockname()[1]
+                snapshot.extend(struct.pack("!H", local_port))
+                sock.close()
+        except Exception:
+            pass
 
-            # Collect system hostname & IP addresses
-            try:
-                hostname = socket.gethostname().encode()
-                snapshot.extend(hostname)
-                
-                ip_addr = socket.gethostbyname(hostname)
-                snapshot.extend(socket.inet_aton(ip_addr))
-            except Exception:
-                pass  # Ignore errors
+        # Network Interface Statistics
+        try:
+            with open("/proc/net/dev", "r") as f:
+                lines = f.readlines()[2:]
+                for line in lines:
+                    fields = line.split()
+                    if len(fields) >= 10:
+                        snapshot.extend(struct.pack("!Q", int(fields[1])))  # RX Bytes
+                        snapshot.extend(struct.pack("!Q", int(fields[9])))  # TX Bytes
+        except Exception:
+            pass
 
-            # Collect random MAC addresses using interface names
-            try:
-                for iface in os.listdir('/sys/class/net/'):
-                    mac_path = f"/sys/class/net/{iface}/address"
-                    if os.path.exists(mac_path):
-                        with open(mac_path, 'r') as f:
-                            mac = f.read().strip().replace(":", "")
-                            snapshot.extend(bytes.fromhex(mac))
-            except Exception:
-                pass  # Ignore errors
+        # Interface Up/Down State
+        try:
+            for iface in os.listdir('/sys/class/net/'):
+                state_path = f"/sys/class/net/{iface}/operstate"
+                if os.path.exists(state_path):
+                    with open(state_path, 'r') as f:
+                        snapshot.extend(struct.pack("!B", 1 if f.read().strip() == "up" else 0))
+        except Exception:
+            pass
 
-            # Collect routing table (Linux-specific)
-            try:
-                with open("/proc/net/route", "r") as f:
-                    routes = f.read().encode()
-                    snapshot.extend(routes[:64])  # Limit to avoid excessive data
-            except Exception:
-                pass  # Ignore errors
+        # Ping Local Router & Capture Timing Jitter
+        try:
+            start_time = time.perf_counter_ns()
+            subprocess.run(["ping", "-c", "1", "-W", "1", "192.168.1.1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            elapsed_time = time.perf_counter_ns() - start_time
+            snapshot.extend(elapsed_time.to_bytes(8, 'big'))
+        except Exception:
+            pass
 
-            # Capture timestamps
-            timestamp1 = time.time_ns()
-            timestamp2 = time.monotonic_ns()
-            snapshot.extend(timestamp1.to_bytes(8, byteorder='big'))
-            snapshot.extend(timestamp2.to_bytes(8, byteorder='big'))
+        # Query ARP Table for Router MAC Address
+        try:
+            with open("/proc/net/arp", "r") as f:
+                arp_entries = f.readlines()[1:]
+                for entry in arp_entries:
+                    fields = entry.split()
+                    if len(fields) >= 4:
+                        snapshot.extend(socket.inet_aton(fields[0]))  # IP
+                        snapshot.extend(bytes.fromhex(fields[3].replace(":", "")))  # MAC
+        except Exception:
+            pass
 
-            # Add to history
-            history.append(snapshot)
+        # Capture TCP Retransmission Count
+        try:
+            with open("/proc/net/snmp", "r") as f:
+                lines = f.readlines()
+                for line in lines:
+                    if "Tcp:" in line:
+                        parts = line.split()
+                        snapshot.extend(struct.pack("!Q", int(parts[11])))  # TCP retransmissions
+        except Exception:
+            pass
 
-            # Small random delay between samples
-            time.sleep((time.time_ns() % 50000) / 1e9)  # Microsecond-based delay
+        # Capture Network Buffer Fill Levels from /proc/net/softnet_stat
+        try:
+            with open("/proc/net/softnet_stat", "r") as f:
+                lines = f.readlines()
+                for line in lines:
+                    values = [int(x, 16) for x in line.split()]
+                    snapshot.extend(struct.pack("!Q", values[0]))  # First value is buffer fill level
+        except Exception:
+            pass
 
-        # Flatten history into temp_data
-        temp_data.extend(b''.join(history))
+        # Capture TCP/UDP Queue Depths from /proc/net/netstat
+        try:
+            with open("/proc/net/netstat", "r") as f:
+                lines = f.readlines()
+                for line in lines:
+                    if "TcpExt:" in line:
+                        parts = line.split()
+                        snapshot.extend(struct.pack("!Q", int(parts[7])))  # TCP queue depth
+        except Exception:
+            pass
 
-        return temp_data
+        return snapshot
 
-    # Ensure at least 256 bytes are collected
-    while len(network_data) < 256:
+    while len(network_data) < 256 and attempts < max_attempts:
         new_data = collect_network_metrics()
         network_data.extend(new_data)
-        if len(new_data) == 0:  # Prevent infinite loops
+        attempts += 1
+        if len(new_data) == 0:
             print("Warning: No new network data collected, stopping early.")
-            break  
+            return b''  
 
-    # Trim to exactly 256 bytes
     network_data = network_data[:256]
 
-    # Final SHA-512 hash to distribute randomness
-    final_entropy = hashlib.shake_256(network_data).digest(256)
+    xor_entropy = bytes(a ^ b for a, b in zip(network_data, os.urandom(len(network_data))))
+    final_entropy = hashlib.shake_256(xor_entropy).digest(256)
     hex_viewer(final_entropy)
+    input("\nPress ANY KEY for the next source")
 
     return final_entropy
 
-   
-def get_system_entropy():
-    print("\nSystem entropy gathers CPU, memory, and system statistics.")
-    if input("Do you want to use this source? (Y/n): ").strip().lower() not in ['y', '']:
-        print("Skipping system entropy.")
+
+# ENTROPY SOURCE - randoness from machine meterics
+def get_machine_entropy():
+    os.system("clear && printf '\x1b[3J'")
+
+    print("\n\nMACHINE STATE ENTROPY")
+    print("Extracts randomness from volatile system states, including CPU load variations, memory availability, process scheduling jitter, uptime fluctuations, kernel entropy metrics, RAM access timing, and CPU execution jitter.")
+
+    if input("\nDo you want to use this source? (Y/n): ").strip().lower() not in ['y', '']:
+        print("Skipping machine entropy.")
         return b''
 
-    # Gather entropy from system-related statistics
-    try:
-        load_avg = os.getloadavg()  # (1 min, 5 min, 15 min)
-    except OSError:
-        load_avg = (random.uniform(0, 10), random.uniform(0, 10), random.uniform(0, 10))  # Fallback for unsupported systems
+    def jitter_entropy():
+        """Creates entropy from timing jitter in nanoseconds."""
+        t1 = time.perf_counter_ns()
+        t2 = time.time_ns()
+        t3 = time.monotonic_ns()
+        return struct.pack("!Q", t1 ^ t2 ^ t3)
 
-    uptime = time.time() - os.stat('/proc/1').st_ctime if os.path.exists('/proc/1') else random.randint(0, 2**32)
+    def ram_jitter_entropy():
+        """Creates entropy by forcing RAM operations and measuring execution time."""
+        buffer = bytearray(1024 * 1024)  # Allocate 1MB
+        start_time = time.perf_counter_ns()
+        for i in range(len(buffer)):
+            buffer[i] = (buffer[i] + i) % 256  # Modify memory
+        elapsed_time = time.perf_counter_ns() - start_time
+        return struct.pack("!Q", elapsed_time)
+
+    def thread_jitter_entropy():
+        """Runs computations on multiple threads to introduce unpredictable scheduling delays."""
+        def worker():
+            _ = sum(x * x for x in range(500000))  # Computational work
+
+        start_time = time.perf_counter_ns()
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        elapsed_time = time.perf_counter_ns() - start_time
+        return struct.pack("!Q", elapsed_time)
+
+    # Gather entropy from system statistics
+    try:
+        load_avg = os.getloadavg() + (len(os.sched_getaffinity(0)),)
+    except OSError:
+        load_avg = (0, 0, 0, 0)
+
+    uptime = time.time() - min(
+        os.stat('/proc/1').st_ctime,
+        os.stat('/proc/self').st_ctime
+    ) if os.path.exists('/proc/1') else jitter_entropy()
 
     try:
         with open("/proc/meminfo", "r") as f:
             meminfo = f.read()
-        total_memory = int(next((line.split(":")[1].strip().split()[0] for line in meminfo.split("\n") if "MemTotal" in line), "0"))
-        available_memory = int(next((line.split(":")[1].strip().split()[0] for line in meminfo.split("\n") if "MemAvailable" in line), "0"))
+        swap_usage = int(next((line.split(":")[1].strip().split()[0] for line in meminfo.split("\n") if "SwapFree" in line), "0"))
     except FileNotFoundError:
-        total_memory = random.randint(2**30, 2**32)  # Random fallback
-        available_memory = random.randint(0, total_memory)  # Random fallback
+        swap_usage = jitter_entropy()
 
-    # Count number of processes
     try:
         num_processes = len(os.listdir('/proc'))
     except FileNotFoundError:
-        num_processes = random.randint(50, 500)  # Random fallback for non-Linux
+        num_processes = jitter_entropy()
 
-    # Gather entropy from CPU usage (Linux only)
     try:
         with open("/proc/stat", "r") as f:
             cpu_stat = f.readline().split()
-            cpu_usage = sum(map(int, cpu_stat[1:])) % 100  # Extracted CPU usage as a rough metric
+            cpu_usage = sum(map(int, cpu_stat[1:])) % 100
     except FileNotFoundError:
-        cpu_usage = random.randint(0, 100)  # Random fallback
+        cpu_usage = jitter_entropy()
+
+    try:
+        with open("/proc/sys/kernel/random/entropy_avail", "r") as f:
+            kernel_entropy = int(f.read().strip())
+    except FileNotFoundError:
+        kernel_entropy = jitter_entropy()
 
     # Convert values to bytes
     data = (
-        struct.pack("!Q", total_memory) +
-        struct.pack("!Q", available_memory) +
+        struct.pack("!Q", swap_usage if isinstance(swap_usage, int) else int.from_bytes(swap_usage, 'big')) +
         struct.pack("!Q", int(cpu_usage * 100)) +
         struct.pack("!Q", int(load_avg[0] * 100)) +
         struct.pack("!Q", int(load_avg[1] * 100)) +
         struct.pack("!Q", int(load_avg[2] * 100)) +
-        struct.pack("!Q", int(uptime)) +
-        struct.pack("!Q", num_processes)
+        struct.pack("!Q", int(uptime) if isinstance(uptime, (int, float)) else int.from_bytes(uptime, 'big')) +
+        struct.pack("!Q", num_processes if isinstance(num_processes, int) else int.from_bytes(num_processes, 'big')) +
+        struct.pack("!Q", kernel_entropy if isinstance(kernel_entropy, int) else int.from_bytes(kernel_entropy, 'big')) +
+        ram_jitter_entropy() +
+        thread_jitter_entropy()
     )
 
-    # **Expand entropy size**
-    while len(data) < 256:  # Extend to at least 256 bytes
-        data += os.urandom(8) 
+    # Ensure at least 256 bytes
+    while len(data) < 256:
+        data += jitter_entropy()
 
-    # **Shuffle bytes randomly to break patterns**
-    data = bytearray(data)
-    random.shuffle(data)
+    # XOR mixing for stronger randomness
+    data = bytes(a ^ b for a, b in zip(data, jitter_entropy() * (len(data) // 8)))
 
     # Final SHA-512 hash to distribute randomness
     final_entropy = hashlib.shake_256(data).digest(256)
     hex_viewer(final_entropy)
+    input("\nPress ANY KEY for the next source")
+
     return final_entropy
 
-
+# walk through each entropy source, then combine the generated entropy
 def generate_entropy():
     entropy_sources = [
-        #("      Keyboard", get_keyboard_entropy()),
-        ("  Hardware RNG", get_hardware_rng()),
-        ("   Yubikey RNG", get_yubikey_rng()),
-        ("Random Integer", get_random_integer()),
-        ("       Secrets", get_secrets()),
-        ("    Dev Random", get_dev_random()),
-        ("    Time-based", get_time_based_entropy()),
-        ("       Network", get_network_entropy()),
-        ("        System", get_system_entropy())
-    ]
+        ("   Quantum Dice", quantum_dice_entropy()),
+        ("Secrets Library", get_secrets()),
+        ("     dev/random", get_dev_random()),
+        ("Network Metrics", get_network_entropy()),
+        ("Machine Entropy", get_machine_entropy()),
+        ("     Random.org", get_random_integer()),
+        ("    Yubikey RNG", get_yubikey_rng()),
+        ("   Hardware RNG", get_hardware_rng())
+    ]    
 
-    combined_sources = b''.join(entropy for _, entropy in entropy_sources)
-    final_entropy_shannon = shannon_entropy(combined_sources)
+    # **Filter out None or invalid entropy sources**
+    valid_entropy = [entropy for _, entropy in entropy_sources if entropy]
 
-    print(f"\nGenerating final entropy")
-    hex_viewer(combined_sources, False)
+    # **Combine entropy sources safely**
+    final_entropy = b''.join(valid_entropy)  
 
-    print(f"\n\nShannon entropy calculations\n")
-    for source_name, entropy in entropy_sources:
-        entropy_shannon = shannon_entropy(entropy)
-        print(f"{source_name}: {entropy_shannon}")
+    # **View combined entropy**
+    print("\n\nCombining Final Entropy\n")
+    hex_viewer(final_entropy, True)
 
-
-    print(f"\n\nShannon Entropy Scale Guide\n"
-        f"7.98 - 8.00 → Near-perfect randomness (Nuclear launch codes)\n"
-        f"7.80 - 7.98 → Excellent randomness (Cryptographic apps)\n"
-        f"7.50 - 7.80 → Strong randomness (Security-sensitive use)\n"
-        f"7.00 - 7.50 → Moderate randomness (Acceptable but could be improved)\n"
-        f"Below  7.00 → Weak randomness (not suitable, patterns likely)")
-
-    print(f"\n\nFINAL COMBINED SHANNON ENTROPY: {final_entropy_shannon}\n")
-
-    input("\nPress ANY KEY to generate keys")  # Wait for user input before proceeding
+    return final_entropy, entropy_sources
 
 
-    return combined_sources
-
-
-SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141  # Order of secp256k1
-
+# Generate the keys now that we have entropy
 def create_ethereum_keys(entropy):
+    print("\nSeeding key generation")
     print("Validating Private Key Generation...")
 
+    SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141  # Order of secp256k1
     attempt = 0
     while True:
         attempt += 1
@@ -646,14 +768,223 @@ def create_ethereum_keys(entropy):
             print(f"Private key is valid within secp256k1 range (Attempt {attempt})")
             break
         else:
-            entropy = mixed_entropy  # Use mixed entropy and retry
-
+            entropy = mixed_entropy  # Use mixed entropy and retry    
+    
     private_key = keys.PrivateKey(private_key_int.to_bytes(32, byteorder='big'))
     public_key = private_key.public_key
     eth_address = public_key.to_address()
 
+    input("\nPrivate key is ready, Check for privacy.\n\nPress ANY KEY to display") 
+    os.system("clear && printf '\x1b[3J'")
+
     return private_key, public_key, eth_address
 
+
+# Performs a Chi-Square Goodness-of-Fit test to check uniform distribution
+def chi_square_test(data):
+    if not data:
+        return None 
+
+    byte_counts = collections.Counter(data)
+    expected = len(data) / 256  # Expected count per byte for uniform distribution
+    chi2_stat = sum((count - expected) ** 2 / expected for count in byte_counts.values())
+
+    return chi2_stat  
+
+
+# Computes correlation between consecutive bytes in data.
+def serial_correlation_test(data):
+    if len(data) < 2:
+        return None
+
+    mean = sum(data) / len(data)
+    numerator = sum((data[i] - mean) * (data[i+1] - mean) for i in range(len(data) - 1))
+    denominator = sum((x - mean) ** 2 for x in data)
+
+    correlation = numerator / denominator if denominator != 0 else 0
+    return correlation
+
+
+# Estimates π using entropy as random (x, y) coordinates.
+def monte_carlo_pi(data):
+    num_pairs = len(data) // 2
+    if num_pairs < 10:
+        return None  # Too little data to estimate π meaningfully
+
+    inside_circle = 0
+    for i in range(0, len(data) - 1, 2):
+        x = data[i] / 255.0  # Normalize to 0-1
+        y = data[i+1] / 255.0
+        if x**2 + y**2 <= 1:
+            inside_circle += 1
+
+    estimated_pi = (inside_circle / num_pairs) * 4
+    return estimated_pi
+
+
+# compute compression ratio
+def compression_ratio(data):
+    if not data:
+        return None
+    compressed_data = zlib.compress(data)
+    return len(compressed_data) / len(data)
+
+
+# compute bit frequency
+def bit_frequency(data):
+    if not data or len(data) == 0:
+        return None, None
+
+    total_bits = len(data) * 8  # Each byte has 8 bits
+    zero_count = sum((byte >> i) & 1 == 0 for byte in data for i in range(8))
+    one_count = total_bits - zero_count  # Complement of zero count
+
+    return zero_count, one_count  # Return **raw bit counts**
+
+
+# display each of the test results
+def display_randomness_tests(entropy, entropy_sources):
+    tests = [
+        {
+            "name": "Shannon Entropy",
+            "description": "Measures the uncertainty in a dataset.\n"
+                           "Higher values indicate more randomness.",
+            "scale": "7.95 - 8.00 → Theoretical maximum entropy (Perfect)\n"
+                     "7.85 - 7.95 → Cryptographically ideal (Strongest randomness)\n"
+                     "7.70 - 7.85 → Excellent (Suitable for key generation)\n"
+                     "7.50 - 7.70 → Strong (Security-sensitive applications)\n"
+                     "7.00 - 7.50 → Moderate (Could be improved)\n"
+                     "Below  7.00 → Weak (Patterns likely)",
+            "function": shannon_entropy
+        },
+        {
+            "name": "Chi-Square Test",
+            "description": "Measures how uniformly distributed the byte values are.\n"
+                           "Lower values suggest better randomness, higher values indicate patterns.",
+            "scale": "  0 - 250 → Good (Uniform)\n"
+                     "250 - 400 → Moderate (Some bias)\n"
+                     "400+      → Poor (Highly non-random)",
+            "function": chi_square_test
+        },
+        {
+            "name": "Serial Correlation Test",
+            "description": "Measures correlation between consecutive bytes.\n"
+                           "Values closer to 0 indicate better randomness.",
+            "scale": "-0.1 to 0.1 → Excellent (No correlation)\n"
+                     " 0.1 to 0.3 → Moderate (Some correlation)\n"
+                     " 0.3+       → Poor (Sequences exist)",
+            "function": serial_correlation_test
+        },
+        {
+            "name": "Monte Carlo π Estimation",
+            "description": "Estimates π based on random coordinate generation.\n"
+                           "Smaller variance from 3.14159 indicates better randomness.",
+            "scale": "0.000 - 0.100 → Excellent (Very random)\n"
+                     "0.101 - 0.300 → Moderate (Some deviation)\n"
+                     "0.301+        → Poor (Non-random)",
+            "function": monte_carlo_pi
+        },
+        {
+            "name": "Compression Ratio",
+            "description": "Measures how well the data compresses. Random data should be hard to compress.\n"
+                           "Lower compression ratios indicate better randomness.",
+            "scale": "0.95 - 1.00 → Excellent (Hard to compress)\n"
+                     "0.90 - 0.95 → Moderate (Some patterns exist)\n"
+                     "Below  0.90 → Poor (Highly compressible, non-random)",
+            "function": compression_ratio
+        },
+        {
+            "name": "Bit Frequency Balance",
+            "description": "Checks the balance of 0s and 1s in the data.\n"
+                           "Perfect randomness should have a ~50% balance of both.",
+            "scale": "0.0% - 0.5% → Excellent (Near perfect balance)\n"
+                     "0.5% - 2.0% → Moderate (Slight imbalance, acceptable)\n"
+                     "> 2.0%      → Poor (Unbalanced, possible bias",
+            "function": bit_frequency
+        }
+    ]
+
+    # Iterate through each randomness test
+    for test in tests:
+        os.system("clear && printf '\x1b[3J'")
+        print("\n" + "=" * 50)
+        print(f"{test['name']}")
+        print("=" * 50)
+        print(test['description'])
+        print("\nInterpretation Guide:")
+        print(test['scale'])
+
+        print("\nResults:")
+
+        # Compute and display test results for each entropy source
+        for source_name, source_entropy in entropy_sources:
+            result = test["function"](source_entropy)
+            formatted_result = format_test_result(test["name"], result)
+            print(f"{source_name}: {formatted_result}")
+
+        # Compute and display test result for final combined entropy
+        final_result = test["function"](entropy)
+        formatted_final_result = format_test_result(test["name"], final_result)
+        print(f"\nFinal Combined Entropy: {formatted_final_result}")
+
+        # Pause before moving to the next test
+        input("\nPress ANY KEY to continue")
+        os.system("clear && printf '\x1b[3J'")
+
+
+# we need to format some of the results
+def format_test_result(test_name, result):
+    """Formats test results properly based on test type."""
+
+    if test_name == "Monte Carlo π Estimation":
+        if result is None:
+            return "Not enough data"
+        variance = abs(result - 3.14159)
+        return f"{result:.6f} ({variance:.5f} variance)"
+
+    elif test_name == "Bit Frequency Balance":
+        if isinstance(result, tuple) and result[0] is not None and result[1] is not None:
+            zero_freq, one_freq = result  # Raw frequency counts
+            total_freq = zero_freq + one_freq
+            expected_half = total_freq / 2  # Expected perfect balance
+
+            # Calculate percentage deviation **from perfect 50% balance**
+            deviation = (abs(zero_freq - expected_half) / expected_half) * 100
+
+            return f"{zero_freq} / {one_freq} ({deviation:.2f}% variance)"
+        return "Not enough data"
+
+    elif test_name == "Chi-Square Test":
+        if isinstance(result, (float, int)):
+            return f"{round(result)}"  # **Ensure it is displayed as an integer**
+        return "Not enough data"
+
+    elif isinstance(result, tuple):  # Some tests return multiple values
+        return " / ".join(f"{val:.3f}" if isinstance(val, float) else str(val) for val in result)
+
+    elif result is None:
+        return "Not enough data"
+
+    else:
+        return f"{result:.3f}" if isinstance(result, float) else str(result)
+
+
+# Disply test results, or just generate keys
+def choose_to_display_tests(entropy, entropy_sources):
+    print(f"\n\nENTROPY GENERATION COMPLETE\n\n"    
+    "The following tests evaluate different aspects of the randomness generated\n\n"
+    "Shannon Entropy    – Measures overall unpredictability\n"
+    "Chi-Square Test    – Checks for uniform byte distribution\n"
+    "Serial Correlation – Detects repeating patterns\n"
+    "Monte Carlo π Est. – Tests statistical randomness\n"
+    "Compression Ratio  – Estimates redundancy in data\n"
+    "Bit Frequency Test – Ensures an even mix of 0s and 1s\n"
+    "\nNo single test can prove true randomness, and some variation is expected. However, strong entropy should perform well across multiple tests without major biases.")
+
+    if input("\n\nDo you want to view the entropy tests before generating keys? (Y/n): ").strip().lower() in ['y', '']:
+        display_randomness_tests(entropy, entropy_sources)
+
+    return
 
 # dont just clear screen, but dump screen buffer    
 def clearScreen():
@@ -665,20 +996,28 @@ def clearScreen():
     sys.exit()
 
 
-if __name__ == '__main__':
-    entropy = generate_entropy()
+if __name__ == '__main__':    
+    # Display the splash screen
+    splash()
+
+    # walk through each entropy source to generate the entropy
+    entropy, entropy_sources = generate_entropy()
+
+    # Do we want to display the entropy tests?
+    choose_to_display_tests(entropy, entropy_sources)    
     
-    print("\nSeeding key generation")
+    # generate keys
     private_key, public_key, eth_address = create_ethereum_keys(entropy)
 
+    # display keys
     print("\n\n-----------BEGIN KEY OUTPUT-------------")
-    print("\n\nprivate key:")
+    print("private key:")
     print(private_key)
     print("\npublic key:")
     print(public_key)
     print("\naddress:")
     print(eth_address)
-    print("\n\n------------END KEY OUTPUT--------------")
+    print("------------END KEY OUTPUT--------------")
     
 
 # clear screen on user input
