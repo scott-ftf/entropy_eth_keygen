@@ -1,8 +1,10 @@
+
+
 # Entropy keygen
 
-For experimenting with entropy sources. The entropy can  then be used to generate Ethereum private keys and addresses.
+For experimenting with entropy sources. The entropy can  then be used to generate Ethereum seed-phrase, private key and address.
 
-Following the entropy generation, the script provides a series of tests to evaluative aspects of the randomness
+The main intend for this script is experimenting with entropy sources. Following the entropy generation, the script provides a series of tests to evaluative aspects of the randomness
 
 | Test Name                           | Purpose                                   |
 | ----------------------------------- | ----------------------------------------- |
@@ -15,27 +17,28 @@ Following the entropy generation, the script provides a series of tests to evalu
 
 
 
-At the end of the script, produces a private/public keypair and address
+At the end of the script, 128 or 256 bits of the generated entropy is used to generate a 12 or 24 word mnemonic phrase using bitcoin's wordlist from https://raw.githubusercontent.com/bitcoin/bips/master/bip-0039/english.txt, adds a checksum for improved integrity, and converts back to a to derive a private key, and Ethereum payment address
 
 ```
 -----------BEGIN KEY OUTPUT-------------
+Seed Phrase:
+expose mammal polar museum addict box ordinary scene creek chair jealous pyramid twist narrow ancient embody where also prepare world tag lesson verb olympic
+
 private key:
-0x61d2e91aaeda7a0996a319635a532c3476aa9a6f50cb8e6005e86f28db8debf4
+ea19bdf326dc3d926ff996c8be91001213216122a46c49255b33431b6a3222de
 
 public key:
-0x95e3c44a3a90788361a77a04f9b072e010b756045a3d6c1787c104b42e1c838777e9a1c1120bd99b6fc82dae4c3db7a97c894c2f0481e2f3238da66109b73367
-
-address:
-0x627a512f29101d6366c2ce49f87866b5c6df3796
+0x6946270E4EDd13c5d0b4A799daA69c7743E6F8f9
 ------------END KEY OUTPUT--------------
+
 
 ```
 
 
 
+---
+
 **⚠️ WARNING:** This script is **EXPERIMENTAL** for testing entropy sources. Use at **YOUR OWN RISK**.
-
-
 
 ---
 
@@ -55,13 +58,13 @@ Before launching the app, paste the key in the `random_org_api.secret` file in t
 
 ### Install
 
-Requires ubuntu LTS and python3 - uses all standard libraries, except for the `eth_keys` and `eth-hash` libraries, which are maintained by the ethereum foundation
+Requires ubuntu LTS and python3 - uses all standard libraries, except for the `eth_keys`, `eth-account`, `eth-utils` and `eth-hash` libraries, which are maintained by the Ethereum foundation. Install the required libraries from the repo root with: 
 
 ```bash
-pip3 install eth-hash[pycryptodome] eth-keys
+pip install -r requirements.txt
 ```
 
-Optionally uses a Yubikey as an Random Number Generator (RNG). This source may be skipped, or to use it, first install Yubicos key manager
+Optionally uses a Yubikey as an Random Number Generator (RNG). This source may be skipped, or to use it, first install Yubico's key manager
 
 ``````bash
 sudo snap install ykman

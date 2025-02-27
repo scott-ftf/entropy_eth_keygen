@@ -1,3 +1,6 @@
+# Stop burning keys
+random_org_api.secret
+
 # Ignore Notes
 notes.md
 notes/

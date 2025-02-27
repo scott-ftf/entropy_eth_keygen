@@ -7,12 +7,13 @@ import time
 import subprocess
 import binascii
 import sys
-import random
 import struct
 import hashlib
 import shutil
 import math
 from eth_keys import keys
+from eth_account import Account
+from eth_account.messages import encode_defunct
 from collections import Counter
 import socket
 import re
@@ -26,6 +27,9 @@ import collections
 # Define the API key file in the application root directory
 API_KEY_FILE = os.path.join(os.path.dirname(__file__), "random_org_api.secret")
 
+
+# Enable unaudited HD wallet features (required for mnemonic-based accounts)
+Account.enable_unaudited_hdwallet_features()
 
 # Calculate Shannon entropy of the byte sequences
 def shannon_entropy(data):
@@ -458,6 +462,7 @@ def get_secrets():
 
     return b''
 
+
 # ENTROPY SOURCE - /dev/random
 def get_dev_random():
     os.system("clear && printf '\x1b[3J'")
@@ -628,14 +633,12 @@ def get_machine_entropy():
         return b''
 
     def jitter_entropy():
-        """Creates entropy from timing jitter in nanoseconds."""
         t1 = time.perf_counter_ns()
         t2 = time.time_ns()
         t3 = time.monotonic_ns()
         return struct.pack("!Q", t1 ^ t2 ^ t3)
 
     def ram_jitter_entropy():
-        """Creates entropy by forcing RAM operations and measuring execution time."""
         buffer = bytearray(1024 * 1024)  # Allocate 1MB
         start_time = time.perf_counter_ns()
         for i in range(len(buffer)):
@@ -644,7 +647,6 @@ def get_machine_entropy():
         return struct.pack("!Q", elapsed_time)
 
     def thread_jitter_entropy():
-        """Runs computations on multiple threads to introduce unpredictable scheduling delays."""
         def worker():
             _ = sum(x * x for x in range(500000))  # Computational work
 
@@ -721,6 +723,7 @@ def get_machine_entropy():
 
     return final_entropy
 
+
 # walk through each entropy source, then combine the generated entropy
 def generate_entropy():
     entropy_sources = [
@@ -734,52 +737,171 @@ def generate_entropy():
         ("   Hardware RNG", get_hardware_rng())
     ]    
 
-    # **Filter out None or invalid entropy sources**
+    # Filter out None or invalid entropy sources
     valid_entropy = [entropy for _, entropy in entropy_sources if entropy]
 
-    # **Combine entropy sources safely**
+    # Combine entropy sources 
     final_entropy = b''.join(valid_entropy)  
 
-    # **View combined entropy**
     print("\n\nCombining Final Entropy\n")
     hex_viewer(final_entropy, True)
 
     return final_entropy, entropy_sources
 
 
-# Generate the keys now that we have entropy
-def create_ethereum_keys(entropy):
-    print("\nSeeding key generation")
-    print("Validating Private Key Generation...")
+def derive_ethereum_private_key(mnemonic: str) -> bytes:
+    """Derive the Ethereum private key from a BIP-39 mnemonic using `eth_account`."""
+    private_key = Account.from_mnemonic(mnemonic)._private_key
+    return private_key
+
+
+# Verify the correctness of generated keys
+def verify_keys(private_key, eth_address, seed_phrase=None, attempt=1):
+    print(f"\n[ATTEMPT {attempt}] Verifying generated wallet...")
 
     SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141  # Order of secp256k1
+
+    # Check Private Key Validity 
+    private_key_int = int.from_bytes(private_key.key, byteorder="big")
+    if not (1 <= private_key_int < SECP256K1_N):
+        print("\nVerification failed: Private key is out of valid secp256k1 range.")
+        print(f"Generated Private Key: {private_key.key.hex()}")
+        print(f"Valid Range: 1 to {hex(SECP256K1_N - 1)}")
+        return False, f"ATTEMPT {attempt}: Private key is invalid."
+    print("  ✓ Private key is within the valid secp256k1 range.")
+
+    # Check Public Key Matches Private Key
+    derived_public_key = private_key._key_obj.public_key
+    if derived_public_key != private_key._key_obj.public_key:
+        print("\nVerification failed: Derived public key does not match expected public key.")
+        print(f"Expected Public Key: {private_key._key_obj.public_key}")
+        print(f"Derived Public Key: {derived_public_key}")
+        return False, f"Attempt {attempt}: Public key does not match private key."
+    print("  ✓ Public key correctly matches private key.")
+
+    # Check Address Correctly Derived from Public Key
+    derived_address = private_key.address
+    if derived_address.lower() != eth_address.lower():
+        print("\nVerification failed: Derived Ethereum address does not match expected address.")
+        print(f"Expected Address: {eth_address}")
+        print(f"Derived Address: {derived_address}")
+        return False, f"Attempt {attempt}: Address does not match derived address."
+    print("  ✓ Ethereum address correctly derived from public key.")
+
+    # Signature Verification Test
+    test_message = encode_defunct(text="Ethereum key verification test.")  # Properly formatted message
+    signed_message = Account.sign_message(test_message, private_key.key)  # Now uses correct format
+    recovered_address = Account.recover_message(test_message, signature=signed_message.signature)
+    
+    if recovered_address.lower() != eth_address.lower():
+        print("\nVerification failed: Signed message verification failed.")
+        print(f"Expected Address: {eth_address}")
+        print(f"Recovered Address: {recovered_address}")
+        return False, f"Attempt {attempt}: Signature verification failed."
+    print("  ✓ Signature verification passed. Private key correctly signs messages.")
+
+    # Mnemonic Consistency Check If Seed Phrase Used
+    if seed_phrase:
+        regenerated_private_key = Account.from_mnemonic(seed_phrase)
+
+        if regenerated_private_key.key.hex() != private_key.key.hex():
+            print("\nVerification failed: Seed phrase does not regenerate the same private key.")
+            print(f"Expected Private Key (Hex): {private_key.key.hex()}")
+            print(f"Regenerated Private Key (Hex): {regenerated_private_key.key.hex()}")
+            return False, f"Attempt {attempt}: Seed phrase does not regenerate the same private key."
+        print("  ✓ Seed phrase correctly regenerates the private key.")
+
+    print("  ✓ All verification checks passed.")
+    return True, f"[Attempt {attempt}] Wallet verification passed!"
+
+
+# Load BIP39 wordlist
+def load_bip39_wordlist():
+    with open("bip39_wordlist.txt", "r") as f:
+        return [word.strip() for word in f.readlines()]
+
+# Generate a BIP39 mnemonic from entropy
+def generate_bip39_mnemonic(entropy):
+    
+    if len(entropy) not in [16, 20, 24, 28, 32]:  # 128-256 bits
+        raise ValueError("Entropy must be 128, 160, 192, 224, or 256 bits.")
+
+    wordlist = load_bip39_wordlist()
+    
+    # Compute checksum
+    checksum_bits = len(entropy) // 4  # Number of bits to take from SHA-256
+    hash_digest = hashlib.sha256(entropy).digest()
+    
+    # Append checksum to entropy
+    entropy_bits = bin(int.from_bytes(entropy, "big"))[2:].zfill(len(entropy) * 8)
+    checksum_bits = bin(int.from_bytes(hash_digest, "big"))[2:].zfill(256)[:checksum_bits]
+    full_bits = entropy_bits + checksum_bits  # Full entropy + checksum
+    
+    # Split into 11-bit chunks
+    mnemonic = [wordlist[int(full_bits[i:i+11], 2)] for i in range(0, len(full_bits), 11)]
+
+    return " ".join(mnemonic)
+
+# Wallet generation process
+def generate_wallet(entropy):
+    MAX_ATTEMPTS = 4
+    os.system("clear && printf '\x1b[3J'")
+    print("\n-----------------------")
+    print("Seeding key generation")
+    print("-----------------------")
+    print("Choose key generation method:\n")
+    print("1) No seed phrase (direct private key generation)")
+    print("2) 12-word mnemonic (HD, Compatible with certain wallets)")
+    print("3) 24-word mnemonic (HD, Highest security)")
+
+    choice = input("\nEnter 1, 2, or 3: ").strip()
+    use_bip39 = choice in ["2", "3"]
+
     attempt = 0
-    while True:
+    while attempt < MAX_ATTEMPTS:
         attempt += 1
+        print(f"\ngenerating wallet...")
 
-        # OLD METHOD - hashed_entropy = hashlib.sha3_256(entropy).digest()
-        # **Instead of hashing once, mix entropy more effectively**
-        
-        mixed_entropy = hashlib.sha3_512(entropy).digest()  # SHA3-512 outputs 64 bytes
-        private_key_bytes = mixed_entropy[:32]  # Use the first 32 bytes
-        # The first 32 bytes are used, but the extra 32 bytes allow entropy reuse for retries - if needed.
+        mixed_entropy = hashlib.sha3_512(entropy).digest()  # 64 bytes total
 
-        private_key_int = int.from_bytes(private_key_bytes, byteorder='big')
+        if not use_bip39:
+            # ption 1: Direct entropy-based private key
+            private_key_bytes = mixed_entropy[:32]
+            private_key = Account.from_key(private_key_bytes)
+            eth_address = private_key.address
+            seed_phrase = None
+        else:
+            # Option 2/3: Generate a mnemonic seed phrase
+            mnemonic_entropy = mixed_entropy[:16] if choice == "2" else mixed_entropy[:32]
+            seed_phrase = generate_bip39_mnemonic(mnemonic_entropy)
 
-        if 1 <= private_key_int < SECP256K1_N:
-            print(f"Private key is valid within secp256k1 range (Attempt {attempt})")
+            # Use eth_account to derive the private key from the mnemonic
+            private_key_obj = Account.from_mnemonic(seed_phrase)
+
+            # Keep as LocalAccount for verification
+            private_key = private_key_obj
+            eth_address = private_key_obj.address
+
+        # Verify key correctness
+        is_valid, verification_msg = verify_keys(private_key, eth_address, seed_phrase, attempt)
+
+        if is_valid:
+            print(verification_msg)
+
+            # Extract the hex private key only AFTER verification
+            private_key = private_key_obj.key.hex() if use_bip39 else private_key.key.hex()
             break
         else:
-            entropy = mixed_entropy  # Use mixed entropy and retry    
-    
-    private_key = keys.PrivateKey(private_key_int.to_bytes(32, byteorder='big'))
-    public_key = private_key.public_key
-    eth_address = public_key.to_address()
+            print(f"{verification_msg} Retrying...")
 
-    input("\nPrivate key is ready, Check for privacy.\n\nPress ANY KEY to display") 
-    os.system("clear && printf '\x1b[3J'")
+        if attempt == MAX_ATTEMPTS:
+            print("\nERROR: The generated wallet could not pass verification after 4 attempts.")
+            print("Please try generating a new source of entropy and rerun the script.")
+            exit(1)
 
-    return private_key, public_key, eth_address
+    input("\nPrivate key is ready. Check for privacy.\n\nPress ANY KEY to display")
+
+    return private_key, eth_address, seed_phrase
 
 
 # Performs a Chi-Square Goodness-of-Fit test to check uniform distribution
@@ -973,17 +1095,19 @@ def format_test_result(test_name, result):
 
 # Disply test results, or just generate keys
 def choose_to_display_tests(entropy, entropy_sources):
-    print(f"\n\nENTROPY GENERATION COMPLETE\n\n"    
-    "The following tests evaluate different aspects of the randomness generated\n\n"
-    "Shannon Entropy    – Measures overall unpredictability\n"
-    "Chi-Square Test    – Checks for uniform byte distribution\n"
-    "Serial Correlation – Detects repeating patterns\n"
-    "Monte Carlo π Est. – Tests statistical randomness\n"
-    "Compression Ratio  – Estimates redundancy in data\n"
-    "Bit Frequency Test – Ensures an even mix of 0s and 1s\n"
+    print(f"\n\n------------------------------")
+    print(f"ENTROPY GENERATION COMPLETE") 
+    print(f"------------------------------\n"   
+    "The following tests evaluate different aspects of the randomness generated:\n\n"
+    "Shannon Entropy\n"
+    "Chi-Square Test\n"
+    "Serial Correlation\n"
+    "Monte Carlo π Estimation\n"
+    "Compression Ratio\n"
+    "Bit Frequency Test\n"
     "\nNo single test can prove true randomness, and some variation is expected. However, strong entropy should perform well across multiple tests without major biases.")
 
-    if input("\n\nDo you want to view the entropy tests before generating keys? (Y/n): ").strip().lower() in ['y', '']:
+    if input("\nDo you want to view the entropy tests before generating keys? (Y/n): ").strip().lower() in ['y', '']:
         display_randomness_tests(entropy, entropy_sources)
 
     return
@@ -1009,15 +1133,17 @@ if __name__ == '__main__':
     choose_to_display_tests(entropy, entropy_sources)    
     
     # generate keys
-    private_key, public_key, eth_address = create_ethereum_keys(entropy)
+    private_key, eth_address, seed_phrase = generate_wallet(entropy)
 
     # display keys
+    os.system("clear && printf '\x1b[3J'")
     print("\n\n-----------BEGIN KEY OUTPUT-------------")
+    if seed_phrase:
+        print("Seed Phrase:")
+        print(f"{seed_phrase}\n")
     print("private key:")
     print(private_key)
     print("\npublic key:")
-    print(public_key)
-    print("\naddress:")
     print(eth_address)
     print("------------END KEY OUTPUT--------------")
     
